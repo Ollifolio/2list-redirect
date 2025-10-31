@@ -1,79 +1,20 @@
-// /api/r.ts
-// Minimaler Redirect für 2List – Edge Function auf Vercel
+import { NextRequest, NextResponse } from 'next/server';
 
-export const config = { runtime: 'edge' };
+// Diese Funktion reagiert auf Aufrufe wie /api/r?u=https://www.zalando.de
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const targetUrl = searchParams.get('u');
 
-// Welche Shops sollen über welches Netzwerk laufen?
-type Network = 'awin' | 'cj' | 'amazon';
-const map: Record<string, Network> = {
-  'zalando.de': 'awin',
-  'hm.com': 'awin',
-  'aboutyou.de': 'awin',
-  'ikea.com': 'cj',
-  'home24.de': 'cj',
-  'amazon.de': 'amazon',
-};
-
-// 👉 Platzhalter – erstmal so lassen. Wenn sie nicht befüllt sind, leiten wir ohne Provision weiter.
-const AWIN_MERCHANT_ID = 'XXXX';   // awinmid (pro Händler unterschiedlich, z. B. Zalando)
-const AWIN_AFFILIATE_ID = 'YYYY';  // deine awinaffid
-const CJ_PID = 'PID12345';         // deine CJ-PID (vom CJ-Dashboard)
-const AMAZON_TAG = 'dein-tag-21';  // dein Amazon-Partner-Tag (z. B. xyz-21)
-
-function hasPlaceholder(...vals: string[]) {
-  return vals.some(v => !v || /x{2,}|y{2,}|pid|tag|dein|your/i.test(v));
-}
-
-function pickHost(u: URL) {
-  const h = u.hostname.toLowerCase();
-  return Object.keys(map).find(domain => h === domain || h.endsWith(`.${domain}`));
-}
-
-function wrapWithAffiliate(target: string, network: Network) {
-  const encoded = encodeURIComponent(target);
-
-  switch (network) {
-    case 'awin':
-      // Falls IDs noch Platzhalter sind → ohne Provision direkt weiter
-      if (hasPlaceholder(AWIN_MERCHANT_ID, AWIN_AFFILIATE_ID)) return target;
-      return `https://www.awin1.com/cread.php?awinmid=${AWIN_MERCHANT_ID}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
-
-    case 'cj':
-      // In CJ pro Advertiser die Deep-Link-URL kopieren und hier einsetzen.
-      if (hasPlaceholder(CJ_PID)) return target;
-      // Beispiel-Pattern:
-      return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
-
-    case 'amazon':
-      if (hasPlaceholder(AMAZON_TAG)) return target;
-      const url = new URL(target);
-      url.searchParams.set('tag', AMAZON_TAG);
-      return url.toString();
-  }
-}
-
-export default async function handler(req: Request) {
-  const here = new URL(req.url);
-  const raw = here.searchParams.get('u');
-  if (!raw) return new Response('Missing u', { status: 400 });
-
-  let target: URL;
-  try {
-    target = new URL(raw);
-  } catch {
-    return new Response('Bad URL', { status: 400 });
+  if (!targetUrl) {
+    return NextResponse.json(
+      { error: 'Missing parameter: u (target URL)' },
+      { status: 400 }
+    );
   }
 
-  // kleine, harmlose Attribution
-  target.searchParams.set('utm_source', '2list');
-  target.searchParams.set('utm_medium', 'app');
+  // Optional: Konsolen-Log für Debug (Vercel Dashboard → Logs)
+  console.log(`Redirecting to: ${targetUrl}`);
 
-  const hostMatch = pickHost(target);
-  const network = hostMatch ? map[hostMatch] : null;
-
-  const finalUrl = network
-    ? wrapWithAffiliate(target.toString(), network)
-    : target.toString(); // Fallback: direkte Weiterleitung (keine Provision)
-
-  return new Response(null, { status: 302, headers: { Location: finalUrl } });
+  // 302 = temporäre Weiterleitung
+  return NextResponse.redirect(targetUrl, 302);
 }
