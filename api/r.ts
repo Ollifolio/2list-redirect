@@ -21,18 +21,16 @@ const SHOPS: Record<string, ShopConfig> = {
   'amazon.de': { network: 'amazon' },
 };
 
-// 🔐 IDs aus Env (Vercel → Settings → Environment Variables)
-const AWIN_AFFILIATE_ID = process.env.AWIN_AFFILIATE_ID || '';
-const CJ_PID = process.env.CJ_PID || '';
-const AMAZON_TAG = process.env.AMAZON_TAG || '';
+// 🔐 IDs aus Env (Edge-sicher über globalThis)
+const AWIN_AFFILIATE_ID = (globalThis as any).process?.env?.AWIN_AFFILIATE_ID ?? '';
+const CJ_PID            = (globalThis as any).process?.env?.CJ_PID ?? '';
+const AMAZON_TAG        = (globalThis as any).process?.env?.AMAZON_TAG ?? '';
 
 // 🔁 Fallback-URL dynamisch auf eigene /api/error-Route bauen
 function makeFallback(base: URL, reason: string, extra?: Record<string, string>) {
   const u = new URL('/api/error', base);
   u.searchParams.set('reason', reason);
-  if (extra) {
-    for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v);
-  }
+  if (extra) for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v);
   return u.toString();
 }
 
