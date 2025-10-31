@@ -1,34 +1,42 @@
-// /api/r.ts — 2List Redirect (Edge, gehärtet mit Allowlist + Fallback)
+// /api/r.ts — 2List Redirect (Edge, gehärtet mit Allowlist + lokalem Fallback)
 export const config = { runtime: 'edge' };
 
-type AwinConfig = { network: 'awin'; mid: string }; // mid = Händler-ID bei AWIN
-type CjConfig = { network: 'cj' };                   // CJ nutzt deine PID aus Env
-type AmazonConfig = { network: 'amazon' };           // Amazon nutzt deinen Tag aus Env
+type AwinConfig = { network: 'awin'; mid: string };
+type CjConfig = { network: 'cj' };
+type AmazonConfig = { network: 'amazon' };
 type ShopConfig = AwinConfig | CjConfig | AmazonConfig;
-
-// ✅ Neutrale Fehlerseite (kannst du anpassen)
-const FALLBACK_ERROR_URL = 'https://2list.app/error';
 
 // ✅ Allowlist der Shops (nur diese Domains sind erlaubt)
 const SHOPS: Record<string, ShopConfig> = {
   // Fashion (AWIN)
-  'zalando.de':   { network: 'awin', mid: 'XXXX' },   // TODO: echte AWIN-MID eintragen
-  'hm.com':       { network: 'awin', mid: 'XXXX' },
-  'aboutyou.de':  { network: 'awin', mid: 'XXXX' },
+  'zalando.de': { network: 'awin', mid: 'XXXX' },
+  'hm.com': { network: 'awin', mid: 'XXXX' },
+  'aboutyou.de': { network: 'awin', mid: 'XXXX' },
 
   // Home (CJ)
-  'ikea.com':     { network: 'cj' },
-  'home24.de':    { network: 'cj' },
+  'ikea.com': { network: 'cj' },
+  'home24.de': { network: 'cj' },
 
   // Direktes Programm
-  'amazon.de':    { network: 'amazon' },
+  'amazon.de': { network: 'amazon' },
 };
 
-// 🔐 IDs aus Env (später in Vercel → Settings → Environment Variables setzen)
+// 🔐 IDs aus Env (Vercel → Settings → Environment Variables)
 const AWIN_AFFILIATE_ID = process.env.AWIN_AFFILIATE_ID || '';
-const CJ_PID            = process.env.CJ_PID || '';
-const AMAZON_TAG        = process.env.AMAZON_TAG || '';
+const CJ_PID = process.env.CJ_PID || '';
+const AMAZON_TAG = process.env.AMAZON_TAG || '';
 
+// 🔁 Fallback-URL dynamisch auf eigene /api/error-Route bauen
+function makeFallback(base: URL, reason: string, extra?: Record<string, string>) {
+  const u = new URL('/api/error', base);
+  u.searchParams.set('reason', reason);
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v);
+  }
+  return u.toString();
+}
+
+// 🔍 Domain-Matching
 function findShopConfig(url: URL): ShopConfig | null {
   const host = url.hostname.toLowerCase();
   for (const domain of Object.keys(SHOPS)) {
@@ -37,15 +45,16 @@ function findShopConfig(url: URL): ShopConfig | null {
   return null;
 }
 
+// 🔗 Tracking hinzufügen
 function withUtm(u: URL): URL {
   u.searchParams.set('utm_source', '2list');
   u.searchParams.set('utm_medium', 'app');
   return u;
 }
 
+// 💰 Affiliate-Link konstruieren
 function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
   const clean = withUtm(new URL(target)); // Kopie + UTM
-
   switch (cfg.network) {
     case 'awin': {
       if (!cfg.mid || !AWIN_AFFILIATE_ID) return clean.toString();
@@ -55,7 +64,6 @@ function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
     case 'cj': {
       if (!CJ_PID) return clean.toString();
       const encoded = encodeURIComponent(clean.toString());
-      // Platzhalter-Pattern: Bitte später durch dein Advertiser-spezifisches CJ-Pattern ersetzen
       return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
     }
     case 'amazon': {
@@ -66,6 +74,7 @@ function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
   }
 }
 
+// 🧱 JSON-Fehlerausgabe (für Tools)
 function jsonError(status: number, message: string): Response {
   return new Response(JSON.stringify({ ok: false, error: message }), {
     status,
@@ -76,6 +85,7 @@ function jsonError(status: number, message: string): Response {
   });
 }
 
+// 🚦 Handler
 export default async function handler(req: Request): Promise<Response> {
   const now = new Date().toISOString();
   const here = new URL(req.url);
@@ -85,7 +95,7 @@ export default async function handler(req: Request): Promise<Response> {
   if (!raw) {
     console.log(JSON.stringify({ ts: now, level: 'warn', msg: 'missing_u_param' }));
     if (prefersJson) return jsonError(400, 'Missing query parameter: u');
-    return Response.redirect(`${FALLBACK_ERROR_URL}?reason=missing_u`, 302);
+    return Response.redirect(makeFallback(here, 'missing_u'), 302);
   }
 
   let target: URL;
@@ -94,7 +104,7 @@ export default async function handler(req: Request): Promise<Response> {
   } catch {
     console.log(JSON.stringify({ ts: now, level: 'warn', msg: 'invalid_url', u: raw }));
     if (prefersJson) return jsonError(400, 'Invalid URL in parameter u');
-    return Response.redirect(`${FALLBACK_ERROR_URL}?reason=invalid_url`, 302);
+    return Response.redirect(makeFallback(here, 'invalid_url'), 302);
   }
 
   // Nur http/https zulassen
@@ -102,7 +112,7 @@ export default async function handler(req: Request): Promise<Response> {
   if (protocol !== 'http:' && protocol !== 'https:') {
     console.log(JSON.stringify({ ts: now, level: 'warn', msg: 'bad_protocol', protocol, u: String(target) }));
     if (prefersJson) return jsonError(400, 'Only http/https protocols are allowed');
-    return Response.redirect(`${FALLBACK_ERROR_URL}?reason=bad_protocol`, 302);
+    return Response.redirect(makeFallback(here, 'bad_protocol'), 302);
   }
 
   // ✅ Strikte Allowlist
@@ -110,15 +120,20 @@ export default async function handler(req: Request): Promise<Response> {
   if (!shopCfg) {
     console.log(JSON.stringify({ ts: now, level: 'warn', msg: 'blocked_by_allowlist', host: target.hostname, u: String(target) }));
     if (prefersJson) return jsonError(403, `Target hostname not allowed: ${target.hostname.toLowerCase()}`);
-    return Response.redirect(`${FALLBACK_ERROR_URL}?reason=blocked&host=${encodeURIComponent(target.hostname)}`, 302);
+    return Response.redirect(makeFallback(here, 'blocked', { host: target.hostname }), 302);
   }
 
   // Affiliate-Link (oder plain Deep-Link, falls IDs fehlen)
   const finalUrl = buildAffiliateUrl(target, shopCfg);
 
   console.log(JSON.stringify({
-    ts: now, level: 'info', msg: 'redirect_ok',
-    from: target.href, to: finalUrl, network: shopCfg.network, status: 302
+    ts: now,
+    level: 'info',
+    msg: 'redirect_ok',
+    from: target.href,
+    to: finalUrl,
+    network: shopCfg.network,
+    status: 302,
   }));
 
   return Response.redirect(finalUrl, 302);
