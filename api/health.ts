@@ -1,8 +1,7 @@
 // /api/health.ts — Vercel Edge Function
 export const config = { runtime: 'edge' };
 
-export default async function handler() {
-  // Kleine, schnelle JSON-Antwort
+export default async function handler(req: Request) {
   return new Response(
     JSON.stringify({ status: 'ok', service: '2list-redirect', version: '1.0.0' }),
     {
@@ -14,4 +13,3 @@ export default async function handler() {
     }
   );
 }
-
