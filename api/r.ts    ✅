@@ -1,20 +1,21 @@
-import { NextRequest, NextResponse } from 'next/server';
+// /api/r.ts — Vanilla Vercel Edge Function
+export const config = { runtime: 'edge' };
 
-// Diese Funktion reagiert auf Aufrufe wie /api/r?u=https://www.zalando.de
-export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const targetUrl = searchParams.get('u');
+export default async function handler(req: Request) {
+  const url = new URL(req.url);
+  const target = url.searchParams.get('u');
 
-  if (!targetUrl) {
-    return NextResponse.json(
-      { error: 'Missing parameter: u (target URL)' },
-      { status: 400 }
-    );
+  if (!target) {
+    return new Response('Missing param: u', { status: 400 });
   }
 
-  // Optional: Konsolen-Log für Debug (Vercel Dashboard → Logs)
-  console.log(`Redirecting to: ${targetUrl}`);
+  // optional, damit du in den Logs etwas siehst
+  // (Vercel → Logs)
+  console.log('Redirecting to:', target);
 
-  // 302 = temporäre Weiterleitung
-  return NextResponse.redirect(targetUrl, 302);
+  // 302 Weiterleitung zum Ziel
+  return new Response(null, {
+    status: 302,
+    headers: { Location: target },
+  });
 }
