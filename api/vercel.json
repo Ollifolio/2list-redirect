@@ -3,5 +3,9 @@
     "api/**/*.ts": {
       "runtime": "edge"
     }
-  }
+  },
+  "routes": [
+    { "src": "/api/r", "dest": "/api/r.ts" },
+    { "src": "/api/health", "dest": "/api/health.ts" }
+  ]
 }
