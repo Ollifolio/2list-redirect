@@ -1,4 +1,4 @@
-// /api/r.ts — 2List Redirect (Edge, Allowlist, optional Logging/Webhook)
+// /api/r.ts — 2List Redirect (Edge, Allowlist, Shortlink-Expand, Logging)
 export const config = { runtime: 'edge' };
 
 type AwinConfig   = { network: 'awin'; mid: string };
@@ -6,57 +6,47 @@ type CjConfig     = { network: 'cj' };
 type AmazonConfig = { network: 'amazon' };
 type ShopConfig   = AwinConfig | CjConfig | AmazonConfig;
 
-// ✅ Allowlist der Shops (nur diese Domains sind erlaubt)
-const SHOPS: Record<string, ShopConfig> = {
-  // Fashion (AWIN)
-  'zalando.de':   { network: 'awin',   mid: 'XXXX' },
-  'hm.com':       { network: 'awin',   mid: 'XXXX' },
-  'aboutyou.de':  { network: 'awin',   mid: 'XXXX' },
+// ✅ Vendor-Gruppen (robuster als Einzeldomains)
+const AMAZON_HOSTS = new Set([
+  'amazon.de', 'www.amazon.de',
+  // häufige Amazon-Shortener:
+  'amzn.to', 'www.amzn.to',
+  'amzn.eu', 'www.amzn.eu',
+]);
 
-  // Home (CJ)
+// ✅ Allowlist: benutze Gruppen + weitere Shops
+const SHOPS: Record<string, ShopConfig> = {
+  // FASHION (AWIN)
+  'zalando.de':   { network: 'awin', mid: 'XXXX' },
+  'hm.com':       { network: 'awin', mid: 'XXXX' },
+  'aboutyou.de':  { network: 'awin', mid: 'XXXX' },
+
+  // HOME (CJ)
   'ikea.com':     { network: 'cj' },
   'home24.de':    { network: 'cj' },
 
-  // Direktes Programm
-'amazon.de': { network: 'amazon' },
-'amzn.to':   { network: 'amazon' },
-'amzn.eu':   { network: 'amazon' },
+  // AMAZON (Vendor-Gruppe über Funktion abgedeckt)
+  'amazon.de':    { network: 'amazon' }, // Beibehalt für Konsistenz
 };
 
-// 🔐 ENV (Edge-sicher über globalThis)
+// 🔐 ENV
 const ENV = ((globalThis as any).process?.env ?? {}) as Record<string, string | undefined>;
 const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? '';
 const CJ_PID            = ENV.CJ_PID ?? '';
 const AMAZON_TAG        = ENV.AMAZON_TAG ?? '';
-
-const ENABLE_LOGS       = (ENV.ENABLE_LOGS ?? '').toLowerCase() === 'true'; // console logging
-const LOG_WEBHOOK       = ENV.LOG_WEBHOOK ?? '';                              // optional webhook URL
+const ENABLE_LOGS       = (ENV.ENABLE_LOGS ?? '').toLowerCase() === 'true';
+const LOG_WEBHOOK       = ENV.LOG_WEBHOOK ?? '';
 
 // 🧰 Utils
-const isoNow = () => {
-  try { return new Date().toISOString(); } catch { return '' }
-};
+const isoNow = () => { try { return new Date().toISOString(); } catch { return '' } };
+const host = (u: URL) => u.hostname.toLowerCase();
 
-const domainOf = (u: URL | string) => {
-  try { return (u instanceof URL ? u : new URL(u)).hostname.toLowerCase(); }
-  catch { return '' }
-};
-
-// 🔁 Fallback-URL auf eigene /api/error-Route
+// 🔁 Fallback
 function makeFallback(base: URL, reason: string, extra?: Record<string, string>) {
   const u = new URL('/api/error', base);
   u.searchParams.set('reason', reason);
   if (extra) for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v);
   return u.toString();
-}
-
-// 🔍 Domain-Matching
-function findShopConfig(url: URL): ShopConfig | null {
-  const host = url.hostname.toLowerCase();
-  for (const domain of Object.keys(SHOPS)) {
-    if (host === domain || host.endsWith(`.${domain}`)) return SHOPS[domain];
-  }
-  return null;
 }
 
 // 🔗 UTM
@@ -66,9 +56,9 @@ function withUtm(u: URL): URL {
   return u;
 }
 
-// 💰 Affiliate-Link bauen
+// 💰 Affiliate-Link
 function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
-  const clean = withUtm(new URL(target)); // Kopie + UTM
+  const clean = withUtm(new URL(target));
   switch (cfg.network) {
     case 'awin': {
       if (!cfg.mid || !AWIN_AFFILIATE_ID) return clean.toString();
@@ -88,7 +78,7 @@ function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
   }
 }
 
-// 🧱 JSON-Fehlerausgabe (für Tools)
+// 🧱 JSON-Fehler
 function jsonError(status: number, message: string): Response {
   return new Response(JSON.stringify({ ok: false, error: message }), {
     status,
@@ -100,70 +90,98 @@ function jsonError(status: number, message: string): Response {
   });
 }
 
-// 📝 Logging (konsole + optional Webhook). Keine IP, nur technische Metadaten.
+// 📝 Logging
 async function logEvent(event: Record<string, unknown>) {
   const payload = { ts: isoNow(), app: '2list', ...event };
-
-  // Konsole nur wenn ENABLE_LOGS=true gesetzt ist (reduziert "noise" in prod)
-  if (ENABLE_LOGS) {
-    try { console.log(JSON.stringify(payload)); } catch {}
-  }
-
-  // Optional: externes Ziel (z. B. für ein kleines Dashboard)
+  if (ENABLE_LOGS) { try { console.log(JSON.stringify(payload)); } catch {} }
   if (LOG_WEBHOOK) {
     try {
-      await fetch(LOG_WEBHOOK, {
+      const res = await fetch(LOG_WEBHOOK, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
       });
-    } catch (e) {
-      // still silent in prod
-      if (ENABLE_LOGS) console.warn('log webhook failed');
-    }
+      if (ENABLE_LOGS) console.log(JSON.stringify({ ts: isoNow(), app: '2list', level: 'debug', evt: 'log_webhook_result', status: res.status }));
+    } catch { if (ENABLE_LOGS) console.log(JSON.stringify({ ts: isoNow(), app: '2list', level: 'error', evt: 'log_webhook_failed' })); }
   }
+}
+
+// 🔍 AMAZON: Akzeptiere amazon.de direkt ODER expandiere amzn.* und prüfe Endziel
+function isAmazonHost(h: string) {
+  return AMAZON_HOSTS.has(h) || h.endsWith('.amazon.de');
+}
+
+// 🔎 Kurzlinks expandieren (max. 5 Hops, ohne Auto-Follow)
+async function expandIfShortener(u: URL): Promise<URL> {
+  const h = host(u);
+  if (!AMAZON_HOSTS.has(h)) return u; // nur bekannte Amazon-Shortener
+  let current = u;
+  for (let i = 0; i < 5; i++) {
+    const res = await fetch(current.toString(), { method: 'GET', redirect: 'manual' });
+    const loc = res.headers.get('location');
+    if (!loc) break;
+    const next = new URL(loc, current); // relative → absolut
+    current = next;
+    // Stoppen, wenn wir auf einer echten Amazon-Domain sind
+    if (host(current).endsWith('.amazon.de') || host(current) === 'amazon.de') break;
+  }
+  return current;
+}
+
+// 🔎 Allowlist prüfen (inkl. Amazon-Vendor-Gruppe)
+function findShopConfig(url: URL): ShopConfig | null {
+  const h = host(url);
+  // Amazon-Gruppe: akzeptiere amazon.de direkt
+  if (h === 'amazon.de' || h.endsWith('.amazon.de')) return { network: 'amazon' };
+  // sonst klassische statische Allowlist
+  for (const domain of Object.keys(SHOPS)) {
+    if (h === domain || h.endsWith(`.${domain}`)) return SHOPS[domain];
+  }
+  return null;
 }
 
 // 🚦 Handler
 export default async function handler(req: Request): Promise<Response> {
   const here = new URL(req.url);
   const raw = here.searchParams.get('u');
-  const albumId = here.searchParams.get('a') || ''; // optional aus App
+  const albumId = here.searchParams.get('a') || '';
   const ua = req.headers.get('user-agent') || '';
   const prefersJson = (req.headers.get('accept') || '').includes('application/json');
 
   if (!raw) {
     await logEvent({ level: 'warn', evt: 'redirect_missing_u', albumId, ua });
-    if (prefersJson) return jsonError(400, 'Missing query parameter: u');
-    return Response.redirect(makeFallback(here, 'missing_u'), 302);
+    return prefersJson ? jsonError(400, 'Missing query parameter: u') : Response.redirect(makeFallback(here, 'missing_u'), 302);
   }
 
   let target: URL;
-  try {
-    target = new URL(raw);
-  } catch {
+  try { target = new URL(raw); }
+  catch {
     await logEvent({ level: 'warn', evt: 'redirect_invalid_url', albumId, ua, u: raw });
-    if (prefersJson) return jsonError(400, 'Invalid URL in parameter u');
-    return Response.redirect(makeFallback(here, 'invalid_url'), 302);
+    return prefersJson ? jsonError(400, 'Invalid URL in parameter u') : Response.redirect(makeFallback(here, 'invalid_url'), 302);
   }
 
-  // Nur http/https
   const protocol = target.protocol.toLowerCase();
   if (protocol !== 'http:' && protocol !== 'https:') {
-    await logEvent({ level: 'warn', evt: 'redirect_bad_protocol', albumId, ua, protocol, host: target.hostname });
-    if (prefersJson) return jsonError(400, 'Only http/https protocols are allowed');
-    return Response.redirect(makeFallback(here, 'bad_protocol'), 302);
+    await logEvent({ level: 'warn', evt: 'redirect_bad_protocol', albumId, ua, protocol, host: host(target) });
+    return prefersJson ? jsonError(400, 'Only http/https protocols are allowed') : Response.redirect(makeFallback(here, 'bad_protocol'), 302);
   }
 
-  // ✅ Strikte Allowlist
+  // 🧩 Amazon-Kurzlink ggf. expandieren (amzn.* → amazon.de)
+  if (isAmazonHost(host(target)) && (host(target).startsWith('amzn.'))) {
+    const before = target.toString();
+    target = await expandIfShortener(target);
+    if (ENABLE_LOGS) await logEvent({ level: 'debug', evt: 'expanded_shortlink', from: before, to: target.toString() });
+  }
+
+  // ✅ Allowlist (inkl. Amazon-Gruppe)
   const shopCfg = findShopConfig(target);
   if (!shopCfg) {
-    await logEvent({ level: 'warn', evt: 'redirect_blocked_allowlist', albumId, ua, host: target.hostname });
-    if (prefersJson) return jsonError(403, `Target hostname not allowed: ${target.hostname.toLowerCase()}`);
-    return Response.redirect(makeFallback(here, 'blocked', { host: target.hostname }), 302);
+    await logEvent({ level: 'warn', evt: 'redirect_blocked_allowlist', albumId, ua, host: host(target) });
+    return prefersJson
+      ? jsonError(403, `Target hostname not allowed: ${host(target)}`)
+      : Response.redirect(makeFallback(here, 'blocked', { host: host(target) }), 302);
   }
 
-  // Affiliate-Link (oder plain Deep-Link, falls IDs fehlen)
   const finalUrl = buildAffiliateUrl(target, shopCfg);
 
   await logEvent({
@@ -171,7 +189,7 @@ export default async function handler(req: Request): Promise<Response> {
     evt: 'redirect_ok',
     albumId,
     ua,
-    domain: domainOf(target),
+    domain: host(target),
     network: shopCfg.network,
   });
 
