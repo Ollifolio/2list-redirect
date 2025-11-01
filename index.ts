@@ -1,4 +1,4 @@
-// /api/index.ts — 2List Redirect Root Info Page
+// /index.ts — Root index for 2List Redirect
 export const config = { runtime: 'edge' };
 
 export default async function handler() {
