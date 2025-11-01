@@ -18,7 +18,9 @@ const SHOPS: Record<string, ShopConfig> = {
   'home24.de':    { network: 'cj' },
 
   // Direktes Programm
-  'amazon.de':    { network: 'amazon' },
+'amazon.de': { network: 'amazon' },
+'amzn.to':   { network: 'amazon' },
+'amzn.eu':   { network: 'amazon' },
 };
 
 // 🔐 ENV (Edge-sicher über globalThis)
