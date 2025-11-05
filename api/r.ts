@@ -1,51 +1,60 @@
 // /api/r.ts — 2List Redirect (Edge, Allowlist, Shortlink-Expand, Logging)
 export const config = { runtime: 'edge' };
 
-// ---- Types
-type AwinConfig   = { network: 'awin'; mid: string };
-type CjConfig     = { network: 'cj' };
-type AmazonConfig = { network: 'amazon' };
-type ShopConfig   = AwinConfig | CjConfig | AmazonConfig;
+// -----------------------------------------------------------------------------
+// TYPES
+// -----------------------------------------------------------------------------
+type NetworkKind = 'awin' | 'cj' | 'amazon';
 
-// ---- Type Guards
-function isAwin(cfg: ShopConfig): cfg is AwinConfig { return cfg.network === 'awin'; }
-function isCj(cfg: ShopConfig): cfg is CjConfig { return cfg.network === 'cj'; }
-function isAmazon(cfg: ShopConfig): cfg is AmazonConfig { return cfg.network === 'amazon'; }
+type AwinInfo   = { network: 'awin'; mid: string };
+type CjInfo     = { network: 'cj' };
+type AmazonInfo = { network: 'amazon' };
+type NetworkInfo = AwinInfo | CjInfo | AmazonInfo;
 
-// ---- Vendor groups (robuster als Einzeldomains)
+// -----------------------------------------------------------------------------
+// ENV
+// -----------------------------------------------------------------------------
+const ENV = ((globalThis as any).process?.env ?? {}) as Record<string, string | undefined>;
+const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? ''; // z. B. 2638306
+const CJ_PID            = ENV.CJ_PID ?? '';
+const AMAZON_TAG        = ENV.AMAZON_TAG ?? '';
+const ENABLE_LOGS       = (ENV.ENABLE_LOGS ?? '').toLowerCase() === 'true';
+const LOG_WEBHOOK       = ENV.LOG_WEBHOOK ?? '';
+
+// -----------------------------------------------------------------------------
+// CONSTANTS / VENDOR-GROUPS
+// -----------------------------------------------------------------------------
 const AMAZON_HOSTS = new Set([
   'amazon.de', 'www.amazon.de',
   'amzn.to',   'www.amzn.to',
   'amzn.eu',   'www.amzn.eu',
 ]);
 
-// ---- Allowlist: benannte Partner-Shops (Affiliate). Rest wird clean durchgelassen.
-const SHOPS: Record<string, ShopConfig> = {
-  // FASHION (AWIN)
-  'zalando.de':   { network: 'awin', mid: 'XXXX' },
-  'hm.com':       { network: 'awin', mid: 'XXXX' },
-  'aboutyou.de':  { network: 'awin', mid: 'XXXX' },
+// AWIN: domain -> MID
+const AWIN_SHOPS: Record<string, string> = {
+  // FASHION
+  'zalando.de':   'XXXX',
+  'hm.com':       'XXXX',
+  'aboutyou.de':  'XXXX',
 
-  // AMAZGIFTS (AWIN)
-  'amazgifts.de': { network: 'awin', mid: '87569' },
-
-  // HOME (CJ)
-  'ikea.com':     { network: 'cj' },
-  'home24.de':    { network: 'cj' },
-
-  // AMAZON (Vendor-Gruppe über Funktion abgedeckt; belassen für Konsistenz)
-  'amazon.de':    { network: 'amazon' },
+  // AMAZGIFTS
+  'amazgifts.de': '87569',
 };
 
-// ---- ENV
-const ENV = ((globalThis as any).process?.env ?? {}) as Record<string, string | undefined>;
-const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? ''; // z. B. 2638306 (in Vercel gesetzt)
-const CJ_PID            = ENV.CJ_PID ?? '';
-const AMAZON_TAG        = ENV.AMAZON_TAG ?? '';
-const ENABLE_LOGS       = (ENV.ENABLE_LOGS ?? '').toLowerCase() === 'true';
-const LOG_WEBHOOK       = ENV.LOG_WEBHOOK ?? '';
+// CJ: nur Domains (kein MID)
+const CJ_SHOPS = new Set<string>([
+  'ikea.com',
+  'home24.de',
+]);
 
-// ---- Utils
+// Amazon (optional in Listen – eigentliche Erkennung unten)
+const AMAZON_DOMAINS = new Set<string>([
+  'amazon.de',
+]);
+
+// -----------------------------------------------------------------------------
+// UTILS
+// -----------------------------------------------------------------------------
 const isoNow = () => { try { return new Date().toISOString(); } catch { return ''; } };
 const host   = (u: URL) => u.hostname.toLowerCase();
 
@@ -63,45 +72,106 @@ function withUtm(u: URL): URL {
   return copy;
 }
 
-// ---- Affiliate-Link Builder (mit Guard, TS-sicher)
-function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
+function isAmazonHost(h: string) {
+  return AMAZON_HOSTS.has(h) || h.endsWith('.amazon.de');
+}
+
+async function expandIfShortener(u: URL): Promise<URL> {
+  const h = host(u);
+  if (!AMAZON_HOSTS.has(h)) return u; // nur bekannte Amazon-Shortener
+  let current = u;
+  for (let i = 0; i < 5; i++) {
+    const res = await fetch(current.toString(), { method: 'GET', redirect: 'manual' });
+    const loc = res.headers.get('location');
+    if (!loc) break;
+    const next = new URL(loc, current);
+    current = next;
+    const ch = host(current);
+    if (ch.endsWith('.amazon.de') || ch === 'amazon.de' || ch === 'www.amazon.de') break;
+  }
+  return current;
+}
+
+// -----------------------------------------------------------------------------
+// NETWORK LOOKUP (radikal neu, kein ShopConfig/Union mit mid mehr)
+// -----------------------------------------------------------------------------
+function getNetworkInfo(h: string): NetworkInfo | null {
+  // Amazon-Erkennung zuerst (Shortener, Subdomains)
+  if (h === 'amazon.de' || h === 'www.amazon.de' || h.endsWith('.amazon.de')) {
+    return { network: 'amazon' };
+  }
+  if (AMAZON_DOMAINS.has(h)) {
+    return { network: 'amazon' };
+  }
+
+  // AWIN-Map (exakt oder Subdomain-Treffer)
+  if (h in AWIN_SHOPS) {
+    return { network: 'awin', mid: AWIN_SHOPS[h] };
+  }
+  // Subdomain von AWIN-Partner
+  for (const d of Object.keys(AWIN_SHOPS)) {
+    if (h.endsWith(`.${d}`)) {
+      return { network: 'awin', mid: AWIN_SHOPS[d] };
+    }
+  }
+
+  // CJ-Set
+  if (CJ_SHOPS.has(h)) {
+    return { network: 'cj' };
+  }
+  for (const d of CJ_SHOPS) {
+    if (h.endsWith(`.${d}`)) {
+      return { network: 'cj' };
+    }
+  }
+
+  return null;
+}
+
+// -----------------------------------------------------------------------------
+// AFFILIATE URL BUILDER (switch – mid nur im AWIN-Case)
+// -----------------------------------------------------------------------------
+function buildAffiliateUrl(target: URL, info: NetworkInfo): string {
   const clean = withUtm(new URL(target));
 
-  if (isAwin(cfg)) {
-    if (!cfg.mid || !AWIN_AFFILIATE_ID) return clean.toString();
-    const encoded = encodeURIComponent(clean.toString());
-    return `https://www.awin1.com/cread.php?awinmid=${cfg.mid}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
-  }
+  switch (info.network) {
+    case 'awin': {
+      if (!AWIN_AFFILIATE_ID) return clean.toString();
+      const mid = info.mid; // garantiert vorhanden in diesem Zweig
+      if (!mid) return clean.toString();
+      const encoded = encodeURIComponent(clean.toString());
+      return `https://www.awin1.com/cread.php?awinmid=${mid}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
+    }
 
-  if (isCj(cfg)) {
-    if (!CJ_PID) return clean.toString();
-    const encoded = encodeURIComponent(clean.toString());
-    return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
-  }
+    case 'cj': {
+      if (!CJ_PID) return clean.toString();
+      const encoded = encodeURIComponent(clean.toString());
+      // TODO: advertiser-spezifische CJ-ID (letzte Zahl) pflegen
+      return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
+    }
 
-  if (isAmazon(cfg)) {
-    if (!AMAZON_TAG) return clean.toString();
-    clean.searchParams.set('tag', AMAZON_TAG);
-    return clean.toString();
+    case 'amazon': {
+      if (!AMAZON_TAG) return clean.toString();
+      clean.searchParams.set('tag', AMAZON_TAG);
+      return clean.toString();
+    }
   }
-
-  // fallback – sollte nie erreicht werden
-  return clean.toString();
 }
 
-// ---- JSON-Fehler
-function jsonError(status: number, message: string): Response {
-  return new Response(JSON.stringify({ ok: false, error: message }), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-      'x-robots-tag': 'noindex',
-    },
-  });
+// -----------------------------------------------------------------------------
+// AFFILIATE-FLAG
+// -----------------------------------------------------------------------------
+function isAffiliateFor(info: NetworkInfo): boolean {
+  switch (info.network) {
+    case 'awin':   return !!AWIN_AFFILIATE_ID && !!info.mid;
+    case 'cj':     return !!CJ_PID;
+    case 'amazon': return !!AMAZON_TAG;
+  }
 }
 
-// ---- Logging
+// -----------------------------------------------------------------------------
+// LOGGING
+// -----------------------------------------------------------------------------
 async function logEvent(event: Record<string, unknown>) {
   const payload = { ts: isoNow(), app: '2list', ...event };
   if (ENABLE_LOGS) { try { console.log(JSON.stringify(payload)); } catch {} }
@@ -121,45 +191,20 @@ async function logEvent(event: Record<string, unknown>) {
   }
 }
 
-// ---- Amazon Helpers
-function isAmazonHost(h: string) {
-  return AMAZON_HOSTS.has(h) || h.endsWith('.amazon.de');
+// -----------------------------------------------------------------------------
+// HANDLER
+// -----------------------------------------------------------------------------
+function jsonError(status: number, message: string): Response {
+  return new Response(JSON.stringify({ ok: false, error: message }), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-robots-tag': 'noindex',
+    },
+  });
 }
 
-async function expandIfShortener(u: URL): Promise<URL> {
-  const h = host(u);
-  if (!AMAZON_HOSTS.has(h)) return u; // nur bekannte Amazon-Shortener
-  let current = u;
-  for (let i = 0; i < 5; i++) {
-    const res = await fetch(current.toString(), { method: 'GET', redirect: 'manual' });
-    const loc = res.headers.get('location');
-    if (!loc) break;
-    const next = new URL(loc, current);
-    current = next;
-    if (host(current).endsWith('.amazon.de') || host(current) === 'amazon.de') break;
-  }
-  return current;
-}
-
-// ---- Allowlist Lookup
-function findShopConfig(url: URL): ShopConfig | null {
-  const h = host(url);
-  if (h === 'amazon.de' || h.endsWith('.amazon.de')) return { network: 'amazon' };
-  for (const domain of Object.keys(SHOPS)) {
-    if (h === domain || h.endsWith(`.${domain}`)) return SHOPS[domain];
-  }
-  return null;
-}
-
-// ---- Affiliate-Flag Helper (TS-sicher)
-function isAffiliateFor(cfg: ShopConfig): boolean {
-  if (isAwin(cfg))   return !!(AWIN_AFFILIATE_ID && cfg.mid);
-  if (isCj(cfg))     return !!CJ_PID;
-  if (isAmazon(cfg)) return !!AMAZON_TAG;
-  return false;
-}
-
-// ---- Handler
 export default async function handler(req: Request): Promise<Response> {
   const here = new URL(req.url);
   const raw = here.searchParams.get('u');
@@ -190,27 +235,24 @@ export default async function handler(req: Request): Promise<Response> {
   }
 
   // Amazon-Shortener ggf. expandieren
-  if (isAmazonHost(host(target)) && host(target).startsWith('amzn.')) {
+  const tHost = host(target);
+  if (isAmazonHost(tHost) && tHost.startsWith('amzn.')) {
     const before = target.toString();
     target = await expandIfShortener(target);
     if (ENABLE_LOGS) await logEvent({ level: 'debug', evt: 'expanded_shortlink', from: before, to: target.toString() });
   }
 
-  // Allowlist / Mapping
-  const shopCfg = findShopConfig(target);
-  const finalUrl = shopCfg ? buildAffiliateUrl(target, shopCfg)
-                           : withUtm(new URL(target)).toString();
+  // Netzwerk ermitteln
+  const info = getNetworkInfo(host(target));
 
-  // Logging (auch für Non-Affiliate)
-  type NetworkLog = ShopConfig['network'] | 'direct';
-  const networkLog: NetworkLog = shopCfg ? shopCfg.network : 'direct';
-  const affiliateFlag = shopCfg ? isAffiliateFor(shopCfg) : false;
+  // Ziel-URL (Affiliate oder clean)
+  const finalUrl = info ? buildAffiliateUrl(target, info)
+                        : withUtm(new URL(target)).toString();
 
-  // ✅ Sicherer Zugriff auf mid (nur bei AWIN)
-  let awinMid: string | undefined;
-  if (shopCfg && isAwin(shopCfg)) {
-    awinMid = shopCfg.mid;
-  }
+  // Logging
+  const networkLog: NetworkKind | 'direct' = info ? info.network : 'direct';
+  const affiliateFlag = info ? isAffiliateFor(info) : false;
+  const awinMid = (info && info.network === 'awin') ? info.mid : undefined;
 
   await logEvent({
     level: 'info',
