@@ -9,7 +9,6 @@ type ShopConfig   = AwinConfig | CjConfig | AmazonConfig;
 // ✅ Vendor-Gruppen (robuster als Einzeldomains)
 const AMAZON_HOSTS = new Set([
   'amazon.de', 'www.amazon.de',
-  // häufige Amazon-Shortener:
   'amzn.to', 'www.amzn.to',
   'amzn.eu', 'www.amzn.eu',
 ]);
@@ -29,12 +28,12 @@ const SHOPS: Record<string, ShopConfig> = {
   'home24.de':    { network: 'cj' },
 
   // AMAZON (Vendor-Gruppe über Funktion abgedeckt)
-  'amazon.de':    { network: 'amazon' }, // Beibehalt für Konsistenz
+  'amazon.de':    { network: 'amazon' },
 };
 
 // 🔐 ENV
 const ENV = ((globalThis as any).process?.env ?? {}) as Record<string, string | undefined>;
-const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? ''; // z.B. 2638306 (in Vercel gesetzt)
+const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? ''; // z.B. 2638306
 const CJ_PID            = ENV.CJ_PID ?? '';
 const AMAZON_TAG        = ENV.AMAZON_TAG ?? '';
 const ENABLE_LOGS       = (ENV.ENABLE_LOGS ?? '').toLowerCase() === 'true';
@@ -44,7 +43,7 @@ const LOG_WEBHOOK       = ENV.LOG_WEBHOOK ?? '';
 const isoNow = () => { try { return new Date().toISOString(); } catch { return '' } };
 const host = (u: URL) => u.hostname.toLowerCase();
 
-// 🔁 Fallback-URL (nur wenn du eine interne Fehlerseite willst)
+// 🔁 Fallback-URL
 function makeFallback(base: URL, reason: string, extra?: Record<string, string>) {
   const u = new URL('/api/error', base);
   u.searchParams.set('reason', reason);
@@ -63,24 +62,24 @@ function withUtm(u: URL): URL {
 // 💰 Affiliate-Link
 function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
   const clean = withUtm(new URL(target));
-  switch (cfg.network) {
-    case 'awin': {
-      if (!cfg.mid || !AWIN_AFFILIATE_ID) return clean.toString();
-      const encoded = encodeURIComponent(clean.toString());
-      return `https://www.awin1.com/cread.php?awinmid=${cfg.mid}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
-    }
-    case 'cj': {
-      if (!CJ_PID) return clean.toString();
-      const encoded = encodeURIComponent(clean.toString());
-      // Ersetze 1234567 später mit der advertiser-spezifischen CJ-ID
-      return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
-    }
-    case 'amazon': {
-      if (!AMAZON_TAG) return clean.toString();
-      clean.searchParams.set('tag', AMAZON_TAG);
-      return clean.toString();
-    }
+
+  if (cfg.network === 'awin' && 'mid' in cfg) {
+    if (!cfg.mid || !AWIN_AFFILIATE_ID) return clean.toString();
+    const encoded = encodeURIComponent(clean.toString());
+    return `https://www.awin1.com/cread.php?awinmid=${cfg.mid}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
   }
+
+  if (cfg.network === 'cj') {
+    if (!CJ_PID) return clean.toString();
+    const encoded = encodeURIComponent(clean.toString());
+    // TODO: advertiser-spezifische CJ-ID (statt 1234567) setzen
+    return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
+  }
+
+  // cfg.network === 'amazon'
+  if (!AMAZON_TAG) return clean.toString();
+  clean.searchParams.set('tag', AMAZON_TAG);
+  return clean.toString();
 }
 
 // 🧱 JSON-Fehler
@@ -113,7 +112,7 @@ async function logEvent(event: Record<string, unknown>) {
   }
 }
 
-// 🔍 AMAZON: Akzeptiere amazon.de direkt ODER expandiere amzn.* und prüfe Endziel
+// 🔍 AMAZON: akz. amazon.de direkt ODER expandiere amzn.*
 function isAmazonHost(h: string) {
   return AMAZON_HOSTS.has(h) || h.endsWith('.amazon.de');
 }
@@ -127,9 +126,8 @@ async function expandIfShortener(u: URL): Promise<URL> {
     const res = await fetch(current.toString(), { method: 'GET', redirect: 'manual' });
     const loc = res.headers.get('location');
     if (!loc) break;
-    const next = new URL(loc, current); // relative → absolut
+    const next = new URL(loc, current);
     current = next;
-    // Stoppen, wenn wir auf einer echten Amazon-Domain sind
     if (host(current).endsWith('.amazon.de') || host(current) === 'amazon.de') break;
   }
   return current;
@@ -138,13 +136,11 @@ async function expandIfShortener(u: URL): Promise<URL> {
 // 🔎 Allowlist prüfen (inkl. Amazon-Vendor-Gruppe)
 function findShopConfig(url: URL): ShopConfig | null {
   const h = host(url);
-  // Amazon-Gruppe: akzeptiere amazon.de direkt als "amazon"-Netzwerk
   if (h === 'amazon.de' || h.endsWith('.amazon.de')) return { network: 'amazon' };
-  // sonst klassische statische Allowlist
   for (const domain of Object.keys(SHOPS)) {
     if (h === domain || h.endsWith(`.${domain}`)) return SHOPS[domain];
   }
-  return null; // nicht gelistet => wird clean durchgelassen
+  return null;
 }
 
 // 🚦 Handler
@@ -173,8 +169,8 @@ export default async function handler(req: Request): Promise<Response> {
     return prefersJson ? jsonError(400, 'Only http/https protocols are allowed') : Response.redirect(makeFallback(here, 'bad_protocol'), 302);
   }
 
-  // 🧩 Amazon-Kurzlink ggf. expandieren (amzn.* → amazon.de)
-  if (isAmazonHost(host(target)) && (host(target).startsWith('amzn.'))) {
+  // 🧩 Amazon-Kurzlink ggf. expandieren
+  if (isAmazonHost(host(target)) && host(target).startsWith('amzn.')) {
     const before = target.toString();
     target = await expandIfShortener(target);
     if (ENABLE_LOGS) await logEvent({ level: 'debug', evt: 'expanded_shortlink', from: before, to: target.toString() });
@@ -182,24 +178,19 @@ export default async function handler(req: Request): Promise<Response> {
 
   // ✅ Mapping holen (Affiliate) oder clean durchlassen (Non-Affiliate)
   const shopCfg = findShopConfig(target);
-  const isAffiliate = !!shopCfg;
-  const finalUrl = isAffiliate
-    ? buildAffiliateUrl(target, shopCfg!)
+  const finalUrl = shopCfg
+    ? buildAffiliateUrl(target, shopCfg)
     : withUtm(new URL(target)).toString();
 
-  // ---- direkt über/unter buildAffiliateUrl einfügen ----
-  // ---- Helper bleibt wie von dir eingefügt ----
+  // 🔎 Flag „isAffiliate“ korrekt und typesafe bestimmen
   function isAffiliateFor(cfg: ShopConfig): boolean {
-    switch (cfg.network) {
-      case 'awin':    return !!(AWIN_AFFILIATE_ID && cfg.mid);
-      case 'cj':      return !!CJ_PID;
-      case 'amazon':  return !!AMAZON_TAG;
-    }
+    if (cfg.network === 'awin' && 'mid' in cfg) return !!(AWIN_AFFILIATE_ID && cfg.mid);
+    if (cfg.network === 'cj') return !!CJ_PID;
+    if (cfg.network === 'amazon') return !!AMAZON_TAG;
+    return false;
   }
 
-  // 📝 Vereinheitlichtes Logging für Markt-Radar (robust bei Non-Affiliate)
-  type NetworkLog = ShopConfig['network'] | 'direct';
-  const networkLog: NetworkLog = shopCfg ? shopCfg.network : 'direct';
+  const networkLog: ShopConfig['network'] | 'direct' = shopCfg ? shopCfg.network : 'direct';
   const affiliateFlag = shopCfg ? isAffiliateFor(shopCfg) : false;
 
   await logEvent({
@@ -221,5 +212,4 @@ export default async function handler(req: Request): Promise<Response> {
       Vary: 'Accept',
     },
   });
-
 }
