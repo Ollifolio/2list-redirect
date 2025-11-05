@@ -27,11 +27,16 @@ const SHOPS: Record<string, ShopConfig> = {
 
   // AMAZON (Vendor-Gruppe über Funktion abgedeckt)
   'amazon.de':    { network: 'amazon' }, // Beibehalt für Konsistenz
+
+  // 🎯 NEW: Amazgifts (AWIN) – deine freigeschaltete MID
+  'amazgifts.de': { network: 'awin', mid: '87569' },
 };
 
 // 🔐 ENV
 const ENV = ((globalThis as any).process?.env ?? {}) as Record<string, string | undefined>;
-const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? '';
+
+// 👉 Primär aus Env, fallback auf deine Pub-ID 2638306 (damit es sofort funktioniert)
+const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? '2638306';
 const CJ_PID            = ENV.CJ_PID ?? '';
 const AMAZON_TAG        = ENV.AMAZON_TAG ?? '';
 const ENABLE_LOGS       = (ENV.ENABLE_LOGS ?? '').toLowerCase() === 'true';
@@ -68,6 +73,7 @@ function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
     case 'cj': {
       if (!CJ_PID) return clean.toString();
       const encoded = encodeURIComponent(clean.toString());
+      // Hinweis: 1234567 durch die advertiser-spezifische CJ ID ersetzen
       return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
     }
     case 'amazon': {
@@ -102,7 +108,9 @@ async function logEvent(event: Record<string, unknown>) {
         body: JSON.stringify(payload),
       });
       if (ENABLE_LOGS) console.log(JSON.stringify({ ts: isoNow(), app: '2list', level: 'debug', evt: 'log_webhook_result', status: res.status }));
-    } catch { if (ENABLE_LOGS) console.log(JSON.stringify({ ts: isoNow(), app: '2list', level: 'error', evt: 'log_webhook_failed' })); }
+    } catch {
+      if (ENABLE_LOGS) console.log(JSON.stringify({ ts: isoNow(), app: '2list', level: 'error', evt: 'log_webhook_failed' }));
+    }
   }
 }
 
