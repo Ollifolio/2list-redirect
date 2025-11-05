@@ -14,12 +14,15 @@ const AMAZON_HOSTS = new Set([
   'amzn.eu', 'www.amzn.eu',
 ]);
 
-// ✅ Allowlist: benutze Gruppen + weitere Shops
+// ✅ Allowlist: benannte Partner-Shops (Affiliate), Rest wird clean durchgelassen
 const SHOPS: Record<string, ShopConfig> = {
   // FASHION (AWIN)
   'zalando.de':   { network: 'awin', mid: 'XXXX' },
   'hm.com':       { network: 'awin', mid: 'XXXX' },
   'aboutyou.de':  { network: 'awin', mid: 'XXXX' },
+
+  // ✅ AMAZGIFTS (AWIN)
+  'amazgifts.de': { network: 'awin', mid: '87569' },
 
   // HOME (CJ)
   'ikea.com':     { network: 'cj' },
@@ -27,16 +30,11 @@ const SHOPS: Record<string, ShopConfig> = {
 
   // AMAZON (Vendor-Gruppe über Funktion abgedeckt)
   'amazon.de':    { network: 'amazon' }, // Beibehalt für Konsistenz
-
-  // 🎯 NEW: Amazgifts (AWIN) – deine freigeschaltete MID
-  'amazgifts.de': { network: 'awin', mid: '87569' },
 };
 
 // 🔐 ENV
 const ENV = ((globalThis as any).process?.env ?? {}) as Record<string, string | undefined>;
-
-// 👉 Primär aus Env, fallback auf deine Pub-ID 2638306 (damit es sofort funktioniert)
-const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? '2638306';
+const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? ''; // z.B. 2638306 (in Vercel gesetzt)
 const CJ_PID            = ENV.CJ_PID ?? '';
 const AMAZON_TAG        = ENV.AMAZON_TAG ?? '';
 const ENABLE_LOGS       = (ENV.ENABLE_LOGS ?? '').toLowerCase() === 'true';
@@ -46,7 +44,7 @@ const LOG_WEBHOOK       = ENV.LOG_WEBHOOK ?? '';
 const isoNow = () => { try { return new Date().toISOString(); } catch { return '' } };
 const host = (u: URL) => u.hostname.toLowerCase();
 
-// 🔁 Fallback
+// 🔁 Fallback-URL (nur wenn du eine interne Fehlerseite willst)
 function makeFallback(base: URL, reason: string, extra?: Record<string, string>) {
   const u = new URL('/api/error', base);
   u.searchParams.set('reason', reason);
@@ -56,9 +54,10 @@ function makeFallback(base: URL, reason: string, extra?: Record<string, string>)
 
 // 🔗 UTM
 function withUtm(u: URL): URL {
-  u.searchParams.set('utm_source', '2list');
-  u.searchParams.set('utm_medium', 'app');
-  return u;
+  const copy = new URL(u);
+  if (!copy.searchParams.has('utm_source')) copy.searchParams.set('utm_source', '2list');
+  if (!copy.searchParams.has('utm_medium')) copy.searchParams.set('utm_medium', 'app');
+  return copy;
 }
 
 // 💰 Affiliate-Link
@@ -73,7 +72,7 @@ function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
     case 'cj': {
       if (!CJ_PID) return clean.toString();
       const encoded = encodeURIComponent(clean.toString());
-      // Hinweis: 1234567 durch die advertiser-spezifische CJ ID ersetzen
+      // Ersetze 1234567 später mit der advertiser-spezifischen CJ-ID
       return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
     }
     case 'amazon': {
@@ -139,13 +138,13 @@ async function expandIfShortener(u: URL): Promise<URL> {
 // 🔎 Allowlist prüfen (inkl. Amazon-Vendor-Gruppe)
 function findShopConfig(url: URL): ShopConfig | null {
   const h = host(url);
-  // Amazon-Gruppe: akzeptiere amazon.de direkt
+  // Amazon-Gruppe: akzeptiere amazon.de direkt als "amazon"-Netzwerk
   if (h === 'amazon.de' || h.endsWith('.amazon.de')) return { network: 'amazon' };
   // sonst klassische statische Allowlist
   for (const domain of Object.keys(SHOPS)) {
     if (h === domain || h.endsWith(`.${domain}`)) return SHOPS[domain];
   }
-  return null;
+  return null; // nicht gelistet => wird clean durchgelassen
 }
 
 // 🚦 Handler
@@ -181,24 +180,22 @@ export default async function handler(req: Request): Promise<Response> {
     if (ENABLE_LOGS) await logEvent({ level: 'debug', evt: 'expanded_shortlink', from: before, to: target.toString() });
   }
 
-  // ✅ Allowlist (inkl. Amazon-Gruppe)
+  // ✅ Mapping holen (Affiliate) oder clean durchlassen (Non-Affiliate)
   const shopCfg = findShopConfig(target);
-  if (!shopCfg) {
-    await logEvent({ level: 'warn', evt: 'redirect_blocked_allowlist', albumId, ua, host: host(target) });
-    return prefersJson
-      ? jsonError(403, `Target hostname not allowed: ${host(target)}`)
-      : Response.redirect(makeFallback(here, 'blocked', { host: host(target) }), 302);
-  }
+  const isAffiliate = !!shopCfg;
+  const finalUrl = isAffiliate
+    ? buildAffiliateUrl(target, shopCfg!)
+    : withUtm(new URL(target)).toString();
 
-  const finalUrl = buildAffiliateUrl(target, shopCfg);
-
+  // 📝 Vereinheitlichtes Logging für Markt-Radar
   await logEvent({
     level: 'info',
-    evt: 'redirect_ok',
+    evt: isAffiliate ? 'redirect_ok' : 'redirect_untracked',
     albumId,
     ua,
     domain: host(target),
-    network: shopCfg.network,
+    isAffiliate,
+    network: shopCfg?.network ?? 'none',
   });
 
   return new Response(null, {
