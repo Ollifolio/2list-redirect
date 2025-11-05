@@ -1,25 +1,16 @@
 // /api/r.ts — 2List Redirect (Edge, Allowlist, Shortlink-Expand, Logging)
 export const config = { runtime: 'edge' };
 
-// ---- Types (vereinfachte, robuste Variante)
-type NetworkKind = 'awin' | 'cj' | 'amazon';
+// ---- Types
+type AwinConfig   = { network: 'awin'; mid: string };
+type CjConfig     = { network: 'cj' };
+type AmazonConfig = { network: 'amazon' };
+type ShopConfig   = AwinConfig | CjConfig | AmazonConfig;
 
-/**
- * Vereinheitlichtes Config-Objekt:
- * - 'network' steuert die Logik
- * - 'mid' ist OPTIONAL vorhanden (nur sinnvoll bei 'awin')
- *
- * Vorteil: TS2339 kann nicht mehr auftreten, weil 'mid' immer existiert (als optionales Feld).
- */
-type ShopConfig = {
-  network: NetworkKind;
-  mid?: string; // nur AWIN nutzt das, bei CJ/Amazon bleibt es undefined
-};
-
-// ---- Type Guards (weiter nutzbar, aber nicht zwingend nötig)
-function isAwin(cfg: ShopConfig): boolean   { return cfg.network === 'awin'; }
-function isCj(cfg: ShopConfig): boolean     { return cfg.network === 'cj'; }
-function isAmazon(cfg: ShopConfig): boolean { return cfg.network === 'amazon'; }
+// ---- Type Guards
+function isAwin(cfg: ShopConfig): cfg is AwinConfig { return cfg.network === 'awin'; }
+function isCj(cfg: ShopConfig): cfg is CjConfig { return cfg.network === 'cj'; }
+function isAmazon(cfg: ShopConfig): cfg is AmazonConfig { return cfg.network === 'amazon'; }
 
 // ---- Vendor groups (robuster als Einzeldomains)
 const AMAZON_HOSTS = new Set([
@@ -72,26 +63,29 @@ function withUtm(u: URL): URL {
   return copy;
 }
 
-// ---- Affiliate-Link Builder (einfach & TS-sicher)
+// ---- Affiliate-Link Builder (mit Guard, TS-sicher)
 function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
   const clean = withUtm(new URL(target));
 
-  if (cfg.network === 'awin') {
+  if (isAwin(cfg)) {
     if (!cfg.mid || !AWIN_AFFILIATE_ID) return clean.toString();
     const encoded = encodeURIComponent(clean.toString());
     return `https://www.awin1.com/cread.php?awinmid=${cfg.mid}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
   }
 
-  if (cfg.network === 'cj') {
+  if (isCj(cfg)) {
     if (!CJ_PID) return clean.toString();
     const encoded = encodeURIComponent(clean.toString());
-    // TODO: advertiser-spezifische CJ-ID einsetzen
     return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
   }
 
-  // amazon
-  if (!AMAZON_TAG) return clean.toString();
-  clean.searchParams.set('tag', AMAZON_TAG);
+  if (isAmazon(cfg)) {
+    if (!AMAZON_TAG) return clean.toString();
+    clean.searchParams.set('tag', AMAZON_TAG);
+    return clean.toString();
+  }
+
+  // fallback – sollte nie erreicht werden
   return clean.toString();
 }
 
@@ -157,11 +151,11 @@ function findShopConfig(url: URL): ShopConfig | null {
   return null;
 }
 
-// ---- Affiliate-Flag Helper (nutzt das vereinfachte Typing)
+// ---- Affiliate-Flag Helper (TS-sicher)
 function isAffiliateFor(cfg: ShopConfig): boolean {
-  if (cfg.network === 'awin')   return !!(AWIN_AFFILIATE_ID && cfg.mid);
-  if (cfg.network === 'cj')     return !!CJ_PID;
-  if (cfg.network === 'amazon') return !!AMAZON_TAG;
+  if (isAwin(cfg))   return !!(AWIN_AFFILIATE_ID && cfg.mid);
+  if (isCj(cfg))     return !!CJ_PID;
+  if (isAmazon(cfg)) return !!AMAZON_TAG;
   return false;
 }
 
@@ -212,7 +206,11 @@ export default async function handler(req: Request): Promise<Response> {
   const networkLog: NetworkLog = shopCfg ? shopCfg.network : 'direct';
   const affiliateFlag = shopCfg ? isAffiliateFor(shopCfg) : false;
 
-  const awinMid = shopCfg?.mid; // bei CJ/Amazon = undefined, ok fürs Logging
+  // ✅ Sicherer Zugriff auf mid (nur bei AWIN)
+  let awinMid: string | undefined;
+  if (shopCfg && isAwin(shopCfg)) {
+    awinMid = shopCfg.mid;
+  }
 
   await logEvent({
     level: 'info',
