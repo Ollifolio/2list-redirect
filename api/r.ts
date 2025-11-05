@@ -188,15 +188,15 @@ export default async function handler(req: Request): Promise<Response> {
     : withUtm(new URL(target)).toString();
 
   // 📝 Vereinheitlichtes Logging für Markt-Radar
-  await logEvent({
-    level: 'info',
-    evt: isAffiliate ? 'redirect_ok' : 'redirect_untracked',
-    albumId,
-    ua,
-    domain: host(target),
-    isAffiliate,
-    network: shopCfg?.network ?? 'none',
-  });
+await logEvent({
+  level: 'info',
+  evt: 'redirect_ok',
+  albumId,
+  ua,
+  domain: host(target),
+  network: shopCfg.network,
+  isAffiliate: !!shopCfg.mid || shopCfg.network !== undefined,
+});
 
   return new Response(null, {
     status: 302,
