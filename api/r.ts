@@ -17,9 +17,9 @@ const AMAZON_HOSTS = new Set([
 // ✅ Allowlist: benannte Partner-Shops (Affiliate), Rest wird clean durchgelassen
 const SHOPS: Record<string, ShopConfig> = {
   // FASHION (AWIN)
-  'zalando.de':   { network: 'awin', mid: 'XXXX' },
-  'hm.com':       { network: 'awin', mid: 'XXXX' },
-  'aboutyou.de':  { network: 'awin', mid: 'XXXX' },
+  'zalando.de':   { network: 'awin', mid: '' },
+  'hm.com':       { network: 'awin', mid: '' },
+  'aboutyou.de':  { network: 'awin', mid: '' },
 
   // ✅ AMAZGIFTS (AWIN)
   'amazgifts.de': { network: 'awin', mid: '87569' },
@@ -64,11 +64,11 @@ function withUtm(u: URL): URL {
 function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
   const clean = withUtm(new URL(target));
   switch (cfg.network) {
-    case 'awin': {
-      if (!cfg.mid || !AWIN_AFFILIATE_ID) return clean.toString();
-      const encoded = encodeURIComponent(clean.toString());
-      return `https://www.awin1.com/cread.php?awinmid=${cfg.mid}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
-    }
+case 'awin': {
+  if (!isValidAwinMid(cfg.mid) || !AWIN_AFFILIATE_ID) return clean.toString();
+  const encoded = encodeURIComponent(clean.toString());
+  return `https://www.awin1.com/cread.php?awinmid=${cfg.mid}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
+}
     case 'cj': {
       if (!CJ_PID) return clean.toString();
       const encoded = encodeURIComponent(clean.toString());
