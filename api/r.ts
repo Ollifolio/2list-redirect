@@ -187,16 +187,30 @@ export default async function handler(req: Request): Promise<Response> {
     ? buildAffiliateUrl(target, shopCfg!)
     : withUtm(new URL(target)).toString();
 
-  // 📝 Vereinheitlichtes Logging für Markt-Radar
-await logEvent({
-  level: 'info',
-  evt: 'redirect_ok',
-  albumId,
-  ua,
-  domain: host(target),
-  network: shopCfg.network,
-  isAffiliate: !!shopCfg.mid || shopCfg.network !== undefined,
-});
+  // ---- direkt über/unter buildAffiliateUrl einfügen ----
+  // ---- Helper bleibt wie von dir eingefügt ----
+  function isAffiliateFor(cfg: ShopConfig): boolean {
+    switch (cfg.network) {
+      case 'awin':    return !!(AWIN_AFFILIATE_ID && cfg.mid);
+      case 'cj':      return !!CJ_PID;
+      case 'amazon':  return !!AMAZON_TAG;
+    }
+  }
+
+  // 📝 Vereinheitlichtes Logging für Markt-Radar (robust bei Non-Affiliate)
+  type NetworkLog = ShopConfig['network'] | 'direct';
+  const networkLog: NetworkLog = shopCfg ? shopCfg.network : 'direct';
+  const affiliateFlag = shopCfg ? isAffiliateFor(shopCfg) : false;
+
+  await logEvent({
+    level: 'info',
+    evt: 'redirect_ok',
+    albumId,
+    ua,
+    domain: host(target),
+    network: networkLog,
+    isAffiliate: affiliateFlag,
+  });
 
   return new Response(null, {
     status: 302,
@@ -207,4 +221,5 @@ await logEvent({
       Vary: 'Accept',
     },
   });
+
 }
