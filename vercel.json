@@ -1,5 +1,12 @@
 {
   "cleanUrls": true,
-  "trailingSlash": false
+  "trailingSlash": false,
+  "functions": {
+    "api/**/*.ts": {
+      "runtime": "edge"
+    },
+    "api/**/*.js": {
+      "runtime": "edge"
+    }
+  }
 }
-
