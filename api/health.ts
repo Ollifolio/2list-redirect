@@ -1,8 +1,11 @@
-// /api/health.ts
 export const config = { runtime: 'edge' };
 
 export default function handler() {
-  return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
+  return new Response(JSON.stringify({
+    status: "ok",
+    service: "2list-redirect",
+    version: "1.0.1"   // <— Zahl erhöhen, damit du es im Browser erkennst
+  }), {
     status: 200,
     headers: { "content-type": "application/json" }
   });
