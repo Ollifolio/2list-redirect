@@ -1,6 +1,3 @@
-// /api/r.ts — 2List Redirect (Edge, robust, accepts url|u|t, TS-safe)
-export const config = { runtime: 'edge' };
-
 type AwinConfig   = { network: 'awin'; mid: string };
 type CjConfig     = { network: 'cj' };
 type AmazonConfig = { network: 'amazon' };
