@@ -1,192 +1,183 @@
-// /api/r.ts — 2List Redirect (Edge, MVP clean)
+// /api/r.ts — 2List Redirect (Edge, Allowlist, Clean UTM, Logging)
 export const config = { runtime: 'edge' };
 
+// ---- Typen
 type AwinConfig   = { network: 'awin'; mid: string };
 type CjConfig     = { network: 'cj' };
 type AmazonConfig = { network: 'amazon' };
 type ShopConfig   = AwinConfig | CjConfig | AmazonConfig;
 
-// --- Domain-Gruppen
+// ---- ENV
+const AWIN_AFFILIATE_ID = process.env.AWIN_AFFILIATE_ID || '';
+const CJ_PID            = process.env.CJ_PID || '';
+const AMAZON_TAG        = process.env.AMAZON_TAG || '';
+const LOG_LEVEL         = (process.env.LOG_LEVEL || 'info').toLowerCase();
+
+// ---- Partner-Host-Maps
 const AMAZON_HOSTS = new Set([
-  'amazon.de', 'www.amazon.de',
-  'amzn.to', 'www.amzn.to',
-  'amzn.eu', 'www.amzn.eu',
+  'amazon.de','www.amazon.de','smile.amazon.de',
+  // Kurzlinks:
+  'amzn.to','www.amzn.to'
 ]);
 
-// --- Allowlist: Partner (Affiliate). Rest wird clean durchgelassen.
-const SHOPS: Record<string, ShopConfig> = {
-  // FASHION (AWIN)
-  'zalando.de':   { network: 'awin', mid: '' },       // bis MID vorhanden
-  'hm.com':       { network: 'awin', mid: '' },       // bis MID vorhanden
-  'aboutyou.de':  { network: 'awin', mid: '' },       // bis MID vorhanden
-
-  // AMAZGIFTS (AWIN)
-  'amazgifts.de': { network: 'awin', mid: '87569' },
-
-  // HOME (CJ)
-  'ikea.com':     { network: 'cj' },
-  'home24.de':    { network: 'cj' },
-
-  // AMAZON
-  'amazon.de':    { network: 'amazon' },
+// AWIN: host → merchant id (mid)
+const AWIN_MAP: Record<string, string> = {
+  // Beispiele – bitte pflegen/erweitern
+  'www.zalando.de': 'XXXX', // ← deine echte MID eintragen
+  'zalando.de': 'XXXX',
+  'www.breuninger.com': 'YYYY',
+  'breuninger.com': 'YYYY',
 };
 
-// --- ENV
-const ENV = ((globalThis as any).process?.env ?? {}) as Record<string, string | undefined>;
-const AWIN_AFFILIATE_ID = ENV.AWIN_AFFILIATE_ID ?? '';   // z. B. 2638306
-const CJ_PID            = ENV.CJ_PID ?? '';              // optional
-const AMAZON_TAG        = ENV.AMAZON_TAG ?? '';          // optional
-const ENABLE_LOGS       = (ENV.ENABLE_LOGS ?? '').toLowerCase() === 'true';
-const LOG_WEBHOOK       = ENV.LOG_WEBHOOK ?? '';
+// CJ: hosts (ohne spezielle MID)
+const CJ_HOSTS = new Set<string>([
+  // Beispiele:
+  'www.booking.com','booking.com'
+]);
 
-// --- Utils
-const isoNow = () => { try { return new Date().toISOString(); } catch { return '' } };
-const host = (u: URL) => u.hostname.toLowerCase();
-
-function isValidAwinMid(mid?: string): boolean {
-  return !!mid && /^[0-9]+$/.test(mid);
+// ---- Hilfsfunktionen
+function log(level: 'debug'|'info'|'warn'|'error', msg: string, meta?: unknown) {
+  const order = { debug: 10, info: 20, warn: 30, error: 40 } as const;
+  const want  = order[LOG_LEVEL as keyof typeof order] ?? 20;
+  if (order[level] >= want) {
+    console[level](`[r.ts] ${level.toUpperCase()}: ${msg}${meta ? ' ' + JSON.stringify(meta) : ''}`);
+  }
 }
 
-function withUtm(u: URL): URL {
-  const out = new URL(u);
-  if (!out.searchParams.has('utm_source')) out.searchParams.set('utm_source', '2list');
-  if (!out.searchParams.has('utm_medium')) out.searchParams.set('utm_medium', 'app');
+function cleanAndNormalizeTarget(raw: string): URL | null {
+  try {
+    // Bereits URL? sonst als https interpretieren?
+    const u = new URL(raw);
+    return u;
+  } catch {
+    // Falls nur Host/Pfad kommt (selten), versuche https:
+    try {
+      return new URL(`https://${raw}`);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function sanitizeQuery(u: URL) {
+  // UTM & Tracking-Müll entfernen; du kannst hier nach Bedarf erweitern:
+  const drop = new Set([
+    'utm_source','utm_medium','utm_campaign','utm_term','utm_content',
+    'fbclid','gclid','mc_eid','mc_cid','awc','irgwc','aff','affid'
+  ]);
+  for (const k of [...u.searchParams.keys()]) {
+    if (drop.has(k.toLowerCase())) u.searchParams.delete(k);
+  }
+}
+
+function appendUtm(u: URL) {
+  // Deine eigene Markierung
+  if (!u.searchParams.has('utm_source')) u.searchParams.set('utm_source', '2list');
+  if (!u.searchParams.has('utm_medium')) u.searchParams.set('utm_medium', 'app');
+}
+
+// ---- Netzwerk-Detektion
+function detectShopConfig(u: URL): ShopConfig | null {
+  const host = u.host.toLowerCase();
+
+  // Amazon
+  if (AMAZON_HOSTS.has(host)) {
+    if (!AMAZON_TAG) return null; // Amazon erlaubt ohne Tag keinen Affiliate-Add
+    return { network: 'amazon' };
+  }
+
+  // AWIN
+  if (host in AWIN_MAP) {
+    const mid = AWIN_MAP[host];
+    if (!mid || !AWIN_AFFILIATE_ID || !/^[0-9]+$/.test(mid)) return null;
+    return { network: 'awin', mid };
+  }
+
+  // CJ
+  if (CJ_HOSTS.has(host)) {
+    if (!CJ_PID) return null;
+    return { network: 'cj' };
+  }
+
+  return null;
+}
+
+// ---- Affiliate-Builder
+function buildAmazonUrl(target: URL): URL {
+  // Amazon-Tag per Query anhängen:
+  // amazon.de nutzt oft 'tag' als Partner-ID
+  if (!target.searchParams.has('tag')) target.searchParams.set('tag', AMAZON_TAG);
+  return target;
+}
+
+function buildAwinUrl(target: URL, cfg: AwinConfig): URL {
+  // https://www.awin1.com/cread.php?awinmid=XXX&awinaffid=YYYY&ued=<encoded target>
+  const out = new URL('https://www.awin1.com/cread.php');
+  out.searchParams.set('awinmid', cfg.mid);
+  out.searchParams.set('awinaffid', AWIN_AFFILIATE_ID);
+  out.searchParams.set('ued', target.toString());
   return out;
 }
 
-// --- Affiliate-Builder
-function buildAffiliateUrl(target: URL, cfg: ShopConfig): string {
-  const clean = withUtm(new URL(target));
-  switch (cfg.network) {
-    case 'awin': {
-      if (!isValidAwinMid(cfg.mid) || !AWIN_AFFILIATE_ID) return clean.toString();
-      const encoded = encodeURIComponent(clean.toString());
-      return `https://www.awin1.com/cread.php?awinmid=${cfg.mid}&awinaffid=${AWIN_AFFILIATE_ID}&ued=${encoded}`;
-    }
-    case 'cj': {
-      if (!CJ_PID) return clean.toString();
-      const encoded = encodeURIComponent(clean.toString());
-      // TODO: advertiser-spezifische CJ-ID statt 1234567 setzen
-      return `https://www.anrdoezrs.net/click-${CJ_PID}-1234567?url=${encoded}`;
-    }
-    case 'amazon': {
-      if (!AMAZON_TAG) return clean.toString();
-      clean.searchParams.set('tag', AMAZON_TAG);
-      return clean.toString();
-    }
-  }
+function buildCjUrl(target: URL): URL {
+  // CJ Deep Link: https://www.anrdoezrs.net/links/<PID>/type/dlg/<encoded target>
+  // oder: https://www.kqzyfj.com/click-<PID>-<SID>?url=<encoded>
+  // Wir nutzen hier die Deep-Link-Gateway-Variante:
+  const out = new URL('https://www.anrdoezrs.net/links/');
+  // /links/<PID>/type/dlg/<encoded target>
+  out.pathname = `links/${encodeURIComponent(CJ_PID)}/type/dlg/${encodeURIComponent(target.toString())}`;
+  return out;
 }
 
-// --- Logging
-async function logEvent(event: Record<string, unknown>) {
-  const payload = { ts: isoNow(), app: '2list', ...event };
-  if (ENABLE_LOGS) { try { console.log(JSON.stringify(payload)); } catch {} }
-  if (!LOG_WEBHOOK) return;
-  try {
-    const res = await fetch(LOG_WEBHOOK, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (ENABLE_LOGS) console.log(JSON.stringify({ ts: isoNow(), app: '2list', level: 'debug', evt: 'log_webhook_result', status: res.status }));
-  } catch {
-    if (ENABLE_LOGS) console.log(JSON.stringify({ ts: isoNow(), app: '2list', level: 'error', evt: 'log_webhook_failed' }));
-  }
-}
-
-// --- Amazon Shortener erkennen/expandieren
-function isAmazonHost(h: string) {
-  return AMAZON_HOSTS.has(h) || h.endsWith('.amazon.de');
-}
-
-async function expandIfShortener(u: URL): Promise<URL> {
-  const h = host(u);
-  if (!AMAZON_HOSTS.has(h)) return u;
-  let current = u;
-  for (let i = 0; i < 5; i++) {
-    const res = await fetch(current.toString(), { method: 'GET', redirect: 'manual' });
-    const loc = res.headers.get('location');
-    if (!loc) break;
-    const next = new URL(loc, current);
-    current = next;
-    if (host(current).endsWith('.amazon.de') || host(current) === 'amazon.de') break;
-  }
-  return current;
-}
-
-// --- Mapping
-function findShopConfig(url: URL): ShopConfig | null {
-  const h = host(url);
-  if (h === 'amazon.de' || h.endsWith('.amazon.de')) return { network: 'amazon' };
-  for (const domain of Object.keys(SHOPS)) {
-    if (h === domain || h.endsWith(`.${domain}`)) return SHOPS[domain];
-  }
-  return null; // nicht gelistet => clean redirect
-}
-
-// --- Handler
+// ---- Haupt-Handler
 export default async function handler(req: Request): Promise<Response> {
-  const here = new URL(req.url);
-  const raw = here.searchParams.get('u');
-  const albumId = here.searchParams.get('a') || '';
-  const ua = req.headers.get('user-agent') || '';
+  try {
+    // Eingabe: ?url=…  (Fallback: ?u=… oder ?t=…)
+    const inUrl = new URL(req.url);
+    const raw = inUrl.searchParams.get('url') || inUrl.searchParams.get('u') || inUrl.searchParams.get('t');
+    if (!raw) {
+      return new Response('Missing ?url', { status: 400 });
+    }
 
-  if (!raw) {
-    await logEvent({ level: 'warn', evt: 'redirect_missing_u', albumId, ua });
-    return new Response(JSON.stringify({ ok: false, error: 'Missing query parameter: u' }), {
-      status: 400,
-      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-    });
+    const target = cleanAndNormalizeTarget(raw);
+    if (!target) {
+      return new Response('Invalid url', { status: 400 });
+    }
+
+    // Basispflege
+    sanitizeQuery(target);
+    appendUtm(target);
+
+    // Netzwerk wählen
+    const cfg = detectShopConfig(target);
+    if (!cfg) {
+      // Kein bekannter/konfigurierter Shop: direkt (clean) durchlassen
+      log('info', 'passthrough', { host: target.host });
+      return Response.redirect(target.toString(), 302);
+    }
+
+    // Affiliate-URL bauen
+    let finalUrl: URL;
+    switch (cfg.network) {
+      case 'amazon':
+        finalUrl = buildAmazonUrl(target);
+        break;
+      case 'awin':
+        finalUrl = buildAwinUrl(target, cfg);
+        break;
+      case 'cj':
+        finalUrl = buildCjUrl(target);
+        break;
+      default:
+        // Fallback: passthrough
+        finalUrl = target;
+    }
+
+    log('info', 'redirect', { network: cfg.network, to: finalUrl.toString() });
+    return Response.redirect(finalUrl.toString(), 302);
+
+  } catch (err: any) {
+    log('error', 'exception', { message: err?.message });
+    return new Response('Internal error', { status: 500 });
   }
-
-  let target: URL;
-  try { target = new URL(raw); }
-  catch {
-    await logEvent({ level: 'warn', evt: 'redirect_invalid_url', albumId, ua, u: raw });
-    return new Response(JSON.stringify({ ok: false, error: 'Invalid URL in parameter u' }), {
-      status: 400,
-      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-    });
-  }
-
-  const protocol = target.protocol.toLowerCase();
-  if (protocol !== 'http:' && protocol !== 'https:') {
-    await logEvent({ level: 'warn', evt: 'redirect_bad_protocol', albumId, ua, protocol, host: host(target) });
-    return new Response(JSON.stringify({ ok: false, error: 'Only http/https protocols are allowed' }), {
-      status: 400,
-      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-    });
-  }
-
-  // Amazon Kurzlink ggf. expandieren
-  if (isAmazonHost(host(target)) && host(target).startsWith('amzn.')) {
-    const before = target.toString();
-    target = await expandIfShortener(target);
-    if (ENABLE_LOGS) await logEvent({ level: 'debug', evt: 'expanded_shortlink', from: before, to: target.toString() });
-  }
-
-  // Affiliate-Mapping oder clean
-  const shopCfg = findShopConfig(target);
-  const isAffiliate = !!shopCfg;
-  const finalUrl = isAffiliate ? buildAffiliateUrl(target, shopCfg!) : withUtm(new URL(target)).toString();
-
-  await logEvent({
-    level: 'info',
-    evt: isAffiliate ? 'redirect_ok' : 'redirect_untracked',
-    albumId,
-    ua,
-    domain: host(target),
-    isAffiliate,
-    network: shopCfg?.network ?? 'none',
-  });
-
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: finalUrl,
-      'cache-control': 'no-store',
-      'x-robots-tag': 'noindex',
-      Vary: 'Accept',
-    },
-  });
 }
