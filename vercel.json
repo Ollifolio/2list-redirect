@@ -1,3 +1,0 @@
-git rm vercel.json
-git commit -m "chore: remove vercel.json (edge runtime set per file)"
-git push
